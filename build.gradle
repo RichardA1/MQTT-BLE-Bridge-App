@@ -1,0 +1,65 @@
+// android/app/build.gradle
+// ─────────────────────────────────────────────────────────────────────────────
+// SDK targets locked to Pixel 5 / Android 13 development context.
+// ─────────────────────────────────────────────────────────────────────────────
+
+apply plugin: "com.android.application"
+apply plugin: "com.facebook.react"
+
+android {
+    ndkVersion rootProject.ext.ndkVersion
+    buildToolsVersion rootProject.ext.buildToolsVersion
+    compileSdk rootProject.ext.compileSdkVersion  // 34
+
+    namespace "com.mqttblebridge"
+
+    defaultConfig {
+        applicationId "com.mqttblebridge"
+
+        // ── SDK levels ──────────────────────────────────────────────────────
+        // minSdk 31  → enforces the modern BLE permission model (API 31+)
+        //              and guarantees BLUETOOTH_SCAN + BLUETOOTH_CONNECT
+        //              are available without the legacy fallback branch.
+        //
+        // targetSdk 33 → matches Pixel 5 running Android 13.
+        //                Android 14 (API 34) adds further BLE restrictions;
+        //                bump to 34 only after verifying permission behaviour.
+        // ────────────────────────────────────────────────────────────────────
+        minSdkVersion 31
+        targetSdkVersion 33
+
+        versionCode 1
+        versionName "0.1.1"
+    }
+
+    signingConfigs {
+        debug {
+            storeFile file('debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
+        }
+    }
+}
+
+dependencies {
+    // React Native
+    implementation("com.facebook.react:react-android")
+    implementation("com.facebook.react:hermes-android")
+
+    // BLE — react-native-ble-plx uses Android BluetoothLeScanner internally
+    // No extra native deps needed here; handled by the library's own build.gradle
+}
+
+apply from: file("../../node_modules/@react-native-community/cli-platform-android/native_modules.gradle")
+applyNativeModulesAppBuildGradle(project)

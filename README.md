@@ -75,6 +75,19 @@ npx react-native doctor
 
 ---
 
+## Test Device
+
+| Property | Value |
+|---|---|
+| Device | Google Pixel 5 |
+| Android | 13 (API 33) |
+| Bluetooth | BLE 5.0 |
+| Min SDK | 31 (enforces modern BLE permission model) |
+| Target SDK | 33 |
+| Compile SDK | 34 |
+
+---
+
 ## App Toolchain
 
 | Layer | Tool | Version |
@@ -86,7 +99,6 @@ npx react-native doctor
 | State | Zustand | 4.x |
 | Navigation | React Navigation | 6.x |
 | Build | Android Studio + Gradle | Latest stable |
-
 ---
 
 ## Related / Reference Projects
@@ -164,25 +176,30 @@ global.Buffer = Buffer;
 
 ### 4. Android permissions
 
-Edit `android/app/src/main/AndroidManifest.xml`:
+The full `AndroidManifest.xml` is included at `android/app/src/main/AndroidManifest.xml`.
+
+Key permissions for **Pixel 5 / Android 13 (API 33)**:
+
 ```xml
 <!-- Internet (MQTT over WiFi or mobile data) -->
 <uses-permission android:name="android.permission.INTERNET" />
 <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-<!-- BLE — Android 12+ (API 31+) -->
-<uses-permission android:name="android.permission.BLUETOOTH_SCAN"
-    android:usesPermissionFlags="neverForLocation" />
-<uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+<!-- BLE — API 31+ (Android 12+) modern permission model -->
+<!-- neverForLocation = no location dialog shown to the user on API 33 -->
+<uses-permission
+    android:name="android.permission.BLUETOOTH_SCAN"
+    android:usesPermissionFlags="neverForLocation"
+    tools:targetApi="s" />
+<uses-permission
+    android:name="android.permission.BLUETOOTH_CONNECT"
+    tools:targetApi="s" />
 
-<!-- BLE — Android 11 and below (API ≤ 30) -->
-<uses-permission android:name="android.permission.BLUETOOTH" />
-<uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
-<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-
-<!-- Declare BLE as a required hardware feature -->
+<!-- Required: only install on devices with BLE hardware -->
 <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 ```
+
+> **No `ACCESS_FINE_LOCATION` needed.** The `neverForLocation` flag on `BLUETOOTH_SCAN` tells Android 13 this app does not use BLE to derive the user's location. The legacy `BLUETOOTH` and `BLUETOOTH_ADMIN` permissions are also omitted — they are not used on API 31+.
 
 ### 5. Enable USB debugging on your Android phone
 
@@ -286,21 +303,43 @@ Phase 2 — 3 concurrent devices 🔜
 | `adb devices` shows nothing | Re-plug USB; install your phone's OEM USB driver; set USB mode to "File Transfer" (MTP) |
 | `JAVA_HOME` not found | Close and reopen terminal after setting env vars, or restart Windows |
 | Gradle build fails | `cd android && gradlew.bat clean` then retry |
-| BLE scan returns no results | Grant Location permission at runtime (required on Android ≤ 11); verify Bluetooth is on |
+| BLE scan returns no results | On Pixel 5: pull down notification shade and confirm Bluetooth is on; check that the app has "Nearby devices" permission in Settings → Apps → [App] → Permissions |
 | MQTT not connecting | Use `wss://` for WebSocket brokers; confirm port (8883 = TLS TCP, 8884 = TLS WS) |
 | Metro bundler port conflict | `npx react-native start --port 8082` |
 | App crashes on launch | Check `adb logcat` in Windows Terminal for the actual Java exception |
 
 ---
 
+## Commit Summary (v0.1.2 — Pixel 5 / Android 13 targeting)
+
+```
+chore: target Google Pixel 5 / Android 13 (API 33); clean up BLE permissions
+
+- Set minSdk=31, targetSdk=33, compileSdk=34 in app/build.gradle
+- AndroidManifest: removed legacy BLUETOOTH, BLUETOOTH_ADMIN,
+  ACCESS_FINE_LOCATION — not required on API 33
+- AndroidManifest: BLUETOOTH_SCAN now uses neverForLocation flag,
+  preventing Android from showing a location permission dialog for BLE
+- BLEManager.ts: removed dual API-level permission branch; now uses
+  the single BLUETOOTH_SCAN + BLUETOOTH_CONNECT path for API 31+ only
+- BLEManager.ts: moved MTU request into connectToDevice options (faster
+  on Pixel 5 BLE 5.0 stack than a separate post-connect request)
+- README: added Test Device table (Pixel 5, Android 13, BLE 5.0, SDK levels)
+- README: updated permissions section — explained neverForLocation behaviour
+- README: updated troubleshooting row for BLE scan to Pixel 5 specifics
+- Included annotated AndroidManifest.xml and app/build.gradle as tracked files
+```
+
+---
+
 ## Commit Summary (v0.1.1 — Android-only + Windows dev environment)
 
 ```
-chore:
+chore: narrow platform scope to Android only; add Windows dev setup
 
+- Removed all iOS/Xcode/CocoaPods references from README and source
 - Added full Windows dev environment guide: Node 20 LTS, JDK 17 (Temurin),
   Android Studio SDK Manager + AVD setup, JAVA_HOME + ANDROID_HOME env vars
-- Updated AndroidManifest BLE permissions to cover both API 31+ and legacy ≤ 30
 - Added USB debugging setup steps and adb device verification
 - Noted Android emulator BLE limitation — physical device required
 - Added nRF Connect (Android) and MQTT Explorer (Windows) as recommended dev tools

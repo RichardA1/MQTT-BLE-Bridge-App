@@ -1,16 +1,29 @@
 // src/ble/BLEManager.ts
 // ---------------------------------------------------------------------------
 // Singleton BLE manager.
-// Handles permissions, scanning, connecting, and routing inbound BLE data.
-// Phase 1: supports 1 device. Phase 2: scales to MAX_DEVICES.
+//
+// Target hardware : Google Pixel 5
+// Android version : 13 (API 33)
+// BLE version     : BLE 5.0
+//
+// Permission model (API 31+ / Android 12+):
+//   BLUETOOTH_SCAN  — with android:usesPermissionFlags="neverForLocation"
+//                     so ACCESS_FINE_LOCATION is NOT required for BLE scanning
+//   BLUETOOTH_CONNECT — required to connect to and communicate with devices
+//
+// No legacy BLUETOOTH / BLUETOOTH_ADMIN / ACCESS_FINE_LOCATION needed.
+//
+// Phase 1: 1 connected device  (MAX_DEVICES = 1)
+// Phase 2: 3 connected devices (MAX_DEVICES = 3) — flip the constant below
 // ---------------------------------------------------------------------------
 
 import {BleManager, Device, State} from 'react-native-ble-plx';
-import {PermissionsAndroid} from 'react-native'; // Android only — no iOS
+import {PermissionsAndroid} from 'react-native';
 import {BLEDevice, OnDataCallback} from './BLEDevice';
 import {SCAN_TIMEOUT_MS, RECONNECT_DELAY_MS, NUS_SERVICE_UUID} from './constants';
 
-export const MAX_DEVICES = 1; // Phase 1. Set to 3 for Phase 2.
+/** Change to 3 when ready for Phase 2 multi-device support */
+export const MAX_DEVICES = 1;
 
 export type ScanResult = {id: string; name: string; rssi: number};
 
@@ -28,60 +41,71 @@ class BLEManagerSingleton {
     onData: OnDataCallback;
     onStateChange?: (state: string) => void;
     onScanResult?: (result: ScanResult) => void;
-  }) {
+  }): void {
     this.onData = callbacks.onData;
     this.onStateChange = callbacks.onStateChange;
     this.onScanResult = callbacks.onScanResult;
 
     this.manager.onStateChange(state => {
-      console.log('[BLEManager] State:', state);
+      console.log('[BLEManager] Adapter state:', state);
       this.onStateChange?.(state);
-    }, true);
+    }, true /* emitCurrentState */);
   }
 
   // ── Permissions ───────────────────────────────────────────────────────────
 
-  // Android-only — iOS support is not included in this project.
+  /**
+   * Request BLE permissions for Android 13 (API 33) / Pixel 5.
+   *
+   * On API 31+ the user sees two prompts:
+   *   1. "Allow [App] to find, connect to, and determine the relative
+   *      position of nearby devices?" → BLUETOOTH_SCAN
+   *   2. "Allow [App] to find and connect to nearby Bluetooth devices?"
+   *      → BLUETOOTH_CONNECT
+   *
+   * Because BLUETOOTH_SCAN is declared with neverForLocation in the manifest,
+   * Android does NOT show a location permission dialog for BLE on API 33.
+   */
   async requestPermissions(): Promise<boolean> {
-    const apiLevel = parseInt(PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN ? '31' : '30', 10);
+    const results = await PermissionsAndroid.requestMultiple([
+      PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+      PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+    ]);
 
-    // Android 12+ (API 31+): need BLUETOOTH_SCAN + BLUETOOTH_CONNECT
-    // Android 11 and below: need ACCESS_FINE_LOCATION instead
-    const isAndroid12Plus =
-      typeof PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN !== 'undefined';
+    const allGranted = Object.values(results).every(
+      r => r === PermissionsAndroid.RESULTS.GRANTED,
+    );
 
-    if (isAndroid12Plus) {
-      const grants = await PermissionsAndroid.requestMultiple([
-        PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
-        PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-      ]);
-      return Object.values(grants).every(
-        v => v === PermissionsAndroid.RESULTS.GRANTED,
-      );
-    } else {
-      // Legacy Android ≤ 11
-      const granted = await PermissionsAndroid.request(
-        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-      );
-      return granted === PermissionsAndroid.RESULTS.GRANTED;
+    if (!allGranted) {
+      console.warn('[BLEManager] Permissions not fully granted:', results);
     }
+
+    return allGranted;
   }
 
   // ── Scan ──────────────────────────────────────────────────────────────────
 
   async startScan(): Promise<void> {
     const hasPerms = await this.requestPermissions();
-    if (!hasPerms) throw new Error('Bluetooth permissions denied');
+    if (!hasPerms) {
+      throw new Error(
+        'Bluetooth permissions denied.\n' +
+        'Go to Settings → Apps → [App] → Permissions → Nearby devices and allow all.',
+      );
+    }
 
     const btState = await this.manager.state();
     if (btState !== State.PoweredOn) {
-      throw new Error(`Bluetooth not ready: ${btState}`);
+      throw new Error(
+        `Bluetooth adapter is not ready (state: ${btState}).\n` +
+        'Please enable Bluetooth on the Pixel 5 and try again.',
+      );
     }
 
-    console.log('[BLEManager] Scanning…');
+    console.log('[BLEManager] Starting BLE scan (NUS service filter)…');
 
-    // Filter by NUS service UUID so we only see bridge-compatible devices
+    // Filter scan results to devices advertising the Nordic UART Service UUID.
+    // This avoids flooding the UI with every nearby BLE peripheral.
     this.manager.startDeviceScan(
       [NUS_SERVICE_UUID],
       {allowDuplicates: false},
@@ -91,6 +115,7 @@ class BLEManagerSingleton {
           return;
         }
         if (device) {
+          console.log(`[BLEManager] Found: ${device.name ?? device.id}  RSSI: ${device.rssi}`);
           this.onScanResult?.({
             id: device.id,
             name: device.name ?? device.id,
@@ -100,8 +125,11 @@ class BLEManagerSingleton {
       },
     );
 
-    // Auto-stop after timeout
-    this.scanTimer = setTimeout(() => this.stopScan(), SCAN_TIMEOUT_MS);
+    // Auto-stop scan after timeout to save battery
+    this.scanTimer = setTimeout(() => {
+      console.log('[BLEManager] Scan timeout — stopping.');
+      this.stopScan();
+    }, SCAN_TIMEOUT_MS);
   }
 
   stopScan(): void {
@@ -117,17 +145,25 @@ class BLEManagerSingleton {
 
   async connect(deviceId: string): Promise<void> {
     if (this.devices.size >= MAX_DEVICES) {
-      throw new Error(`Max device limit (${MAX_DEVICES}) reached`);
+      throw new Error(
+        `Max device limit (${MAX_DEVICES}) reached. ` +
+        `Disconnect an existing device first, or increase MAX_DEVICES for Phase 2.`,
+      );
     }
     if (this.devices.has(deviceId)) {
-      console.log('[BLEManager] Already connected:', deviceId);
+      console.log('[BLEManager] Already connected to:', deviceId);
       return;
     }
 
+    // Stop scan before connecting — Pixel 5 / Android 13 performs better
+    // when scan is halted prior to initiating a GATT connection.
     this.stopScan();
 
+    console.log(`[BLEManager] Connecting to ${deviceId}…`);
+
     const rawDevice: Device = await this.manager.connectToDevice(deviceId, {
-      autoConnect: false,
+      autoConnect: false,          // Direct connect — faster on Pixel 5
+      requestMTU: 512,             // Request max MTU upfront; BLE 5.0 supports it
     });
 
     const bleDevice = new BLEDevice(rawDevice, (id, data) => {
@@ -137,25 +173,32 @@ class BLEManagerSingleton {
     await bleDevice.setup();
     this.devices.set(deviceId, bleDevice);
 
-    // Watch for unexpected disconnection and auto-reconnect
-    this.manager.onDeviceDisconnected(deviceId, (_error, _device) => {
-      console.warn(`[BLEManager] ${deviceId} disconnected — reconnecting in ${RECONNECT_DELAY_MS}ms`);
+    // Monitor for unexpected disconnects and auto-reconnect
+    this.manager.onDeviceDisconnected(deviceId, (error, _device) => {
+      if (error) {
+        console.warn(`[BLEManager] ${deviceId} disconnected with error:`, error.message);
+      } else {
+        console.warn(`[BLEManager] ${deviceId} disconnected cleanly.`);
+      }
       this.devices.delete(deviceId);
+      console.log(`[BLEManager] Scheduling reconnect in ${RECONNECT_DELAY_MS}ms…`);
       setTimeout(() => this.connect(deviceId), RECONNECT_DELAY_MS);
     });
 
-    console.log(`[BLEManager] Connected to ${bleDevice.name}`);
+    console.log(`[BLEManager] ✓ Connected to ${bleDevice.name}`);
   }
 
   // ── Write ─────────────────────────────────────────────────────────────────
 
   async write(deviceId: string, data: string): Promise<void> {
     const device = this.devices.get(deviceId);
-    if (!device) throw new Error(`Device ${deviceId} not connected`);
+    if (!device) {
+      throw new Error(`Cannot write — device ${deviceId} is not connected.`);
+    }
     await device.write(data);
   }
 
-  /** Broadcast to ALL connected devices */
+  /** Broadcast the same payload to all connected devices */
   async broadcast(data: string): Promise<void> {
     const writes = [...this.devices.values()].map(d => d.write(data));
     await Promise.allSettled(writes);
@@ -171,17 +214,24 @@ class BLEManagerSingleton {
     return this.devices.has(deviceId);
   }
 
+  getDeviceCount(): number {
+    return this.devices.size;
+  }
+
   // ── Teardown ──────────────────────────────────────────────────────────────
 
   async disconnectAll(): Promise<void> {
+    console.log('[BLEManager] Disconnecting all devices…');
     const disconnects = [...this.devices.values()].map(d => d.disconnect());
     await Promise.allSettled(disconnects);
     this.devices.clear();
   }
 
   destroy(): void {
+    this.stopScan();
     this.disconnectAll();
     this.manager.destroy();
+    console.log('[BLEManager] Destroyed.');
   }
 }
 
